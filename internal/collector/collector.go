@@ -245,11 +245,16 @@ func (c *VCenterCollector) collectEntities(kind string, props []string) {
 				properties["numCpuThreads"] = h.Summary.Hardware.NumCpuThreads
 			}
 
-			properties["version"] = h.Config.Product.Version
-			properties["build"] = h.Config.Product.Build
-			properties["connectionState"] = string(h.Summary.Runtime.ConnectionState)
-			properties["powerState"] = string(h.Summary.Runtime.PowerState)
-			properties["inMaintenanceMode"] = h.Summary.Runtime.InMaintenanceMode
+			if h.Config != nil {
+				properties["version"] = h.Config.Product.Version
+				properties["build"] = h.Config.Product.Build
+			}
+
+			if h.Summary.Runtime != nil {
+				properties["connectionState"] = string(h.Summary.Runtime.ConnectionState)
+				properties["powerState"] = string(h.Summary.Runtime.PowerState)
+				properties["inMaintenanceMode"] = h.Summary.Runtime.InMaintenanceMode
+			}
 
 			// isStandalone: if parent is ComputeResource (not Cluster)
 			isStandalone := false
@@ -270,45 +275,55 @@ func (c *VCenterCollector) collectEntities(kind string, props []string) {
 			id := c.makeID("vm", vm.Reference().Value)
 			props := map[string]any{"name": vm.Name, "moid": vm.Reference().Value}
 
+			// Safe access to Runtime properties (embedded struct in Summary)
 			props["powerState"] = string(vm.Summary.Runtime.PowerState)
 			props["connectionState"] = string(vm.Summary.Runtime.ConnectionState)
-			if !vm.Summary.Runtime.BootTime.IsZero() {
+
+			// BootTime is a *time.Time
+			if vm.Summary.Runtime.BootTime != nil {
 				props["bootTime"] = vm.Summary.Runtime.BootTime.String()
 			}
 
 			if vm.Config != nil {
-				props["guestFullName"] = vm.Config.GuestFullName
-				props["uuid"] = vm.Config.Uuid
-				props["isTemplate"] = vm.Config.Template
-				props["guestId"] = vm.Config.GuestId
-				props["version"] = vm.Config.Version
-				if vm.Config.Hardware.NumCPU > 0 {
-					props["numCPU"] = vm.Config.Hardware.NumCPU
+				cfg := vm.Config
+				props["guestFullName"] = cfg.GuestFullName
+				props["uuid"] = cfg.Uuid
+				props["isTemplate"] = cfg.Template
+				props["guestId"] = cfg.GuestId
+				props["version"] = cfg.Version
+
+				// Hardware is a value struct, but check parent Config
+				if cfg.Hardware.NumCPU > 0 {
+					props["numCPU"] = cfg.Hardware.NumCPU
 				}
-				if vm.Config.Hardware.NumCoresPerSocket > 0 {
-					props["numCoresPerSocket"] = vm.Config.Hardware.NumCoresPerSocket
+				if cfg.Hardware.NumCoresPerSocket > 0 {
+					props["numCoresPerSocket"] = cfg.Hardware.NumCoresPerSocket
 				}
-				if vm.Config.Hardware.MemoryMB > 0 {
-					props["memoryMB"] = vm.Config.Hardware.MemoryMB
+				if cfg.Hardware.MemoryMB > 0 {
+					props["memoryMB"] = cfg.Hardware.MemoryMB
 				}
 			}
 
 			if vm.Guest != nil {
-				props["hostName"] = vm.Guest.HostName
+				gst := vm.Guest
+				props["hostName"] = gst.HostName
 				// ipAddress is single, but user requested ipAddresses[]
 				var ips []string
 				var macs []string
-				for _, nic := range vm.Guest.Net {
-					ips = append(ips, nic.IpAddress...)
-					if nic.MacAddress != "" {
-						macs = append(macs, nic.MacAddress)
+				if gst.Net != nil {
+					for _, nic := range gst.Net {
+						if nic.IpAddress != nil {
+							ips = append(ips, nic.IpAddress...)
+						}
+						if nic.MacAddress != "" {
+							macs = append(macs, nic.MacAddress)
+						}
 					}
 				}
-				// Remove duplicates from macs if any?
 				props["ipAddresses"] = ips
 				props["macAddresses"] = macs
-				props["toolsStatus"] = string(vm.Guest.ToolsStatus)
-				props["toolsVersion"] = vm.Guest.ToolsVersion
+				props["toolsStatus"] = string(gst.ToolsStatus)
+				props["toolsVersion"] = gst.ToolsVersion
 			}
 
 			if vm.Summary.Storage != nil {
