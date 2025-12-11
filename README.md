@@ -95,8 +95,6 @@ The tool generates the following node types:
 | `vCenter_Group` | A vCenter user group. |
 | `vCenter_Role` | A collection of privileges. |
 | `vCenter_Privilege` | A specific granular permission. |
-| `User` | An Active Directory user (created via BHE sync). |
-| `Group` | An Active Directory group (created via BHE sync). |
 
 ## Edge Types
 

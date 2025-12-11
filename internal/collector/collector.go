@@ -404,18 +404,10 @@ func (c *VCenterCollector) CollectPermissions() {
 
 			if !isGroup {
 				c.Debugf("Syncing vCenter user %s to AD user %s", principal, adPrincipalID)
-				c.Graph.AddRawNode([]string{"User"}, adPrincipalID, map[string]any{
-					"name":   adPrincipalID,
-					"domain": fqdn,
-				})
-				c.Graph.AddRawEdge("SyncsTovCenterUser", adPrincipalID, principalID, nil)
+				c.Graph.AddRawEdgeWithMatch("SyncsTovCenterUser", adPrincipalID, "name", principalID, "", nil)
 			} else {
 				c.Debugf("Syncing vCenter group %s to AD group %s", principal, adPrincipalID)
-				c.Graph.AddRawNode([]string{"Group"}, adPrincipalID, map[string]any{
-					"name":   adPrincipalID,
-					"domain": fqdn,
-				})
-				c.Graph.AddRawEdge("SyncsTovCenterGroup", adPrincipalID, principalID, nil)
+				c.Graph.AddRawEdgeWithMatch("SyncsTovCenterGroup", adPrincipalID, "name", principalID, "", nil)
 			}
 		}
 
