@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 
 	"vcenterhoundgo/internal/config"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/vmware/govmomi"
 	"github.com/vmware/govmomi/object"
+	"github.com/vmware/govmomi/property"
 	"github.com/vmware/govmomi/view"
 	"github.com/vmware/govmomi/vim25/methods"
 	"github.com/vmware/govmomi/vim25/mo"
@@ -150,7 +152,7 @@ func (c *VCenterCollector) CollectInfrastructure() {
 	}{
 		{"Folder", []string{"name", "parent", "childEntity"}},
 		{"ClusterComputeResource", []string{"name", "parent", "host", "datastore", "resourcePool", "summary", "configuration"}},
-		{"HostSystem", []string{"name", "parent", "vm", "datastore", "network", "summary"}},
+		{"HostSystem", []string{"name", "parent", "vm", "datastore", "network", "summary", "config.product", "runtime"}},
 		{"VirtualMachine", []string{"name", "parent", "datastore", "network", "config", "guest", "runtime", "summary"}},
 		{"Datastore", []string{"name", "parent", "summary", "info"}},
 		{"Network", []string{"name", "parent", "host", "summary"}},
@@ -178,10 +180,6 @@ func (c *VCenterCollector) collectEntities(kind string, props []string) {
 		return
 	}
 	defer v.Destroy(c.Context)
-
-	// Note: We use the specific types in switch cases below, but govmomi View Retrieve needs a pointer to slice of interfaces or specific types.
-	// To minimize code duplication while keeping type safety, we can't easily make a generic 'retrieve'.
-	// So we keep the switch but use the view we just created.
 
 	switch kind {
 	case "Folder":
@@ -212,7 +210,20 @@ func (c *VCenterCollector) collectEntities(kind string, props []string) {
 				properties["numHosts"] = s.NumHosts
 				properties["effectiveCpu"] = s.EffectiveCpu
 				properties["effectiveMemory"] = s.EffectiveMemory
+				properties["numCpuCores"] = s.NumCpuCores
+				properties["numCpuThreads"] = s.NumCpuThreads
 			}
+
+			// Configuration
+			properties["drsEnabled"] = false
+			properties["haEnabled"] = false
+			if cl.Configuration.DrsConfig.Enabled != nil {
+				properties["drsEnabled"] = *cl.Configuration.DrsConfig.Enabled
+			}
+			if cl.Configuration.DasConfig.Enabled != nil {
+				properties["haEnabled"] = *cl.Configuration.DasConfig.Enabled
+			}
+
 			c.ensureNodeWithTags([]string{"Cluster"}, id, properties, cl.Reference().Value)
 			if cl.Parent != nil {
 				c.Graph.AddEdge("CONTAINS", c.makeID("folder", cl.Parent.Value), id, nil)
@@ -229,7 +240,24 @@ func (c *VCenterCollector) collectEntities(kind string, props []string) {
 				properties["model"] = h.Summary.Hardware.Model
 				properties["numCpuCores"] = h.Summary.Hardware.NumCpuCores
 				properties["memorySize"] = h.Summary.Hardware.MemorySize
+				properties["cpuModel"] = h.Summary.Hardware.CpuModel
+				properties["cpuMhz"] = h.Summary.Hardware.CpuMhz
+				properties["numCpuThreads"] = h.Summary.Hardware.NumCpuThreads
 			}
+
+			properties["version"] = h.Config.Product.Version
+			properties["build"] = h.Config.Product.Build
+			properties["connectionState"] = string(h.Summary.Runtime.ConnectionState)
+			properties["powerState"] = string(h.Summary.Runtime.PowerState)
+			properties["inMaintenanceMode"] = h.Summary.Runtime.InMaintenanceMode
+
+			// isStandalone: if parent is ComputeResource (not Cluster)
+			isStandalone := false
+			if h.Parent != nil && h.Parent.Type == "ComputeResource" {
+				isStandalone = true
+			}
+			properties["isStandalone"] = isStandalone
+
 			c.ensureNodeWithTags([]string{"ESXiHost"}, id, properties, h.Reference().Value)
 			if h.Parent != nil && h.Parent.Type == "ClusterComputeResource" {
 				c.Graph.AddEdge("CONTAINS", c.makeID("cluster", h.Parent.Value), id, nil)
@@ -241,15 +269,55 @@ func (c *VCenterCollector) collectEntities(kind string, props []string) {
 		for _, vm := range vms {
 			id := c.makeID("vm", vm.Reference().Value)
 			props := map[string]any{"name": vm.Name, "moid": vm.Reference().Value}
+
+			props["powerState"] = string(vm.Summary.Runtime.PowerState)
+			props["connectionState"] = string(vm.Summary.Runtime.ConnectionState)
+			if !vm.Summary.Runtime.BootTime.IsZero() {
+				props["bootTime"] = vm.Summary.Runtime.BootTime.String()
+			}
+
 			if vm.Config != nil {
 				props["guestFullName"] = vm.Config.GuestFullName
 				props["uuid"] = vm.Config.Uuid
 				props["isTemplate"] = vm.Config.Template
+				props["guestId"] = vm.Config.GuestId
+				props["version"] = vm.Config.Version
+				if vm.Config.Hardware.NumCPU > 0 {
+					props["numCPU"] = vm.Config.Hardware.NumCPU
+				}
+				if vm.Config.Hardware.NumCoresPerSocket > 0 {
+					props["numCoresPerSocket"] = vm.Config.Hardware.NumCoresPerSocket
+				}
+				if vm.Config.Hardware.MemoryMB > 0 {
+					props["memoryMB"] = vm.Config.Hardware.MemoryMB
+				}
 			}
+
 			if vm.Guest != nil {
 				props["hostName"] = vm.Guest.HostName
-				props["ipAddress"] = vm.Guest.IpAddress
+				// ipAddress is single, but user requested ipAddresses[]
+				var ips []string
+				var macs []string
+				for _, nic := range vm.Guest.Net {
+					ips = append(ips, nic.IpAddress...)
+					if nic.MacAddress != "" {
+						macs = append(macs, nic.MacAddress)
+					}
+				}
+				// Remove duplicates from macs if any?
+				props["ipAddresses"] = ips
+				props["macAddresses"] = macs
+				props["toolsStatus"] = string(vm.Guest.ToolsStatus)
+				props["toolsVersion"] = vm.Guest.ToolsVersion
 			}
+
+			if vm.Summary.Storage != nil {
+				props["storageCommitted"] = strconv.FormatInt(vm.Summary.Storage.Committed, 10)
+				props["storageUncommitted"] = strconv.FormatInt(vm.Summary.Storage.Uncommitted, 10)
+				// storageTotalUsed logic: typically committed space
+				props["storageTotalUsed"] = strconv.FormatInt(vm.Summary.Storage.Committed, 10)
+			}
+
 			c.ensureNodeWithTags([]string{"VM"}, id, props, vm.Reference().Value)
 
 			if vm.Runtime.Host != nil {
@@ -283,14 +351,14 @@ func (c *VCenterCollector) collectEntities(kind string, props []string) {
 		v.Retrieve(c.Context, []string{kind}, props, &nets)
 		for _, net := range nets {
 			id := c.makeID("network", net.Reference().Value)
-			c.ensureNodeWithTags([]string{"Network"}, id, map[string]any{"name": net.Name, "moid": net.Reference().Value}, net.Reference().Value)
+			c.ensureNodeWithTags([]string{"Network"}, id, map[string]any{"name": net.Name, "moid": net.Reference().Value, "type": "Network"}, net.Reference().Value)
 		}
 	case "DistributedVirtualPortgroup":
 		var dvps []mo.DistributedVirtualPortgroup
 		v.Retrieve(c.Context, []string{kind}, props, &dvps)
 		for _, dvp := range dvps {
 			id := c.makeID("dvportgroup", dvp.Reference().Value)
-			c.ensureNodeWithTags([]string{"DVPortgroup", "Network"}, id, map[string]any{"name": dvp.Name, "moid": dvp.Reference().Value}, dvp.Reference().Value)
+			c.ensureNodeWithTags([]string{"DVPortgroup", "Network"}, id, map[string]any{"name": dvp.Name, "moid": dvp.Reference().Value, "type": "DistributedVirtualPortgroup"}, dvp.Reference().Value)
 		}
 	case "VmwareDistributedVirtualSwitch":
 		var dvss []mo.VmwareDistributedVirtualSwitch
@@ -317,6 +385,26 @@ func (c *VCenterCollector) CollectPermissions() {
 	c.Logger.Println("Collecting permissions...")
 	am := object.NewAuthorizationManager(c.Client.Client)
 
+	// Fetch all privileges to map ID -> Name and Group
+	// Since govmomi 0.52.0 might not have FetchPrivilegeList in AuthorizationManager object wrapper,
+	// we will try to fetch the AuthorizationManager properties directly.
+	// But `object.AuthorizationManager` wrapper usually exposes helper methods.
+	// If `PrivilegeList` is not available, we use PropertyCollector.
+
+	// Attempt to get privilege list from AuthorizationManager property "privilegeList"
+	var amMo mo.AuthorizationManager
+	pc := property.DefaultCollector(c.Client.Client)
+	err := pc.RetrieveOne(c.Context, *c.Client.ServiceContent.AuthorizationManager, []string{"privilegeList"}, &amMo)
+
+	privMap := make(map[string]types.AuthorizationPrivilege)
+	if err == nil {
+		for _, p := range amMo.PrivilegeList {
+			privMap[p.PrivId] = p
+		}
+	} else {
+		c.Logger.Printf("Failed to retrieve privilege list: %v", err)
+	}
+
 	// Roles
 	roles, err := am.RoleList(c.Context)
 	if err != nil {
@@ -327,14 +415,42 @@ func (c *VCenterCollector) CollectPermissions() {
 
 	for _, role := range roles {
 		roleID := fmt.Sprintf("role:%s:%d", c.Config.Host, role.RoleId)
+
+		var groups []string
+		seenGroups := make(map[string]bool)
+
+		for _, privStr := range role.Privilege {
+			if pInfo, ok := privMap[privStr]; ok {
+				if pInfo.PrivGroupName != "" && !seenGroups[pInfo.PrivGroupName] {
+					seenGroups[pInfo.PrivGroupName] = true
+					groups = append(groups, pInfo.PrivGroupName)
+				}
+			}
+		}
+
 		c.Graph.EnsureNode([]string{"Role"}, roleID, map[string]any{
-			"name":   role.Name,
-			"roleId": role.RoleId,
-			"tags":   []string{},
+			"name":            role.Name,
+			"roleId":          role.RoleId,
+			"privilegeCount":  len(role.Privilege),
+			"privilegeGroups": groups,
+			"tags":            []string{},
 		})
 		for _, privStr := range role.Privilege {
 			privID := fmt.Sprintf("privilege:%s:%s", c.Config.Host, privStr)
-			c.Graph.EnsureNode([]string{"Privilege"}, privID, map[string]any{"name": privStr, "privId": privStr, "tags": []string{}})
+
+			privName := privStr
+			privGroup := ""
+			if pInfo, ok := privMap[privStr]; ok {
+				privName = pInfo.Name
+				privGroup = pInfo.PrivGroupName
+			}
+
+			c.Graph.EnsureNode([]string{"Privilege"}, privID, map[string]any{
+				"name":        privName,
+				"privId":      privStr,
+				"group":       privGroup,
+				"tags":        []string{},
+			})
 			c.Graph.AddEdge("HAS_PRIVILEGE", roleID, privID, nil)
 		}
 	}
@@ -352,9 +468,6 @@ func (c *VCenterCollector) CollectPermissions() {
 		roleMap[r.RoleId] = r.Name
 	}
 
-	// Permission processing can also be massive, but concurrent addition to graph is safe now.
-	// We can iterate linearly as it's usually fast enough, or shard if needed.
-	// Linear is fine for typical permission counts.
 	for _, perm := range perms {
 		principal := perm.Principal
 		isGroup := perm.Group
@@ -386,10 +499,6 @@ func (c *VCenterCollector) CollectPermissions() {
 			}
 		}
 
-		// Do not set "tags" here for Principals, or ensure it doesn't overwrite if empty.
-		// For Principals (Users/Groups), tags might not be applicable via REST API anyway,
-		// but if they are, we should probably fetch them.
-		// For now, we omit 'tags' key so we don't accidentally set it to empty if it was already set (unlikely for users).
 		c.Graph.EnsureNode([]string{kind}, principalID, map[string]any{
 			"name":     principal,
 			"username": username,
@@ -398,7 +507,6 @@ func (c *VCenterCollector) CollectPermissions() {
 		})
 
 		// SyncsToVCenterUser / SyncsToVCenterGroup Edge
-		// Logic: lookup domain (NetBIOS) in DomainMap -> get FQDN.
 		if fqdn, ok := c.DomainMap[strings.ToUpper(domain)]; ok {
 			adPrincipalID := fmt.Sprintf("%s@%s", strings.ToUpper(username), fqdn)
 
@@ -485,16 +593,12 @@ func (c *VCenterCollector) CollectGroupMemberships() {
 		return
 	}
 
-	// Identify all groups currently in the graph
-	// We must lock the graph to read, but Builder.Export does RLock.
 	data := c.Graph.Export()
 
 	var groups []string
 	for _, node := range data.Nodes {
 		for _, kind := range node.Kinds {
 			if kind == "vCenter_Group" {
-				// The ID is "group:host:name"
-				// We need the raw name from properties
 				if name, ok := node.Properties["name"].(string); ok {
 					groups = append(groups, name)
 				}
@@ -523,7 +627,6 @@ func (c *VCenterCollector) CollectGroupMemberships() {
 
 		resp, err := methods.RetrieveUserGroups(c.Context, c.Client.Client, &req)
 		if err != nil {
-			// Try splitting if it's DOMAIN\Group -> search in DOMAIN
 			if strings.Contains(groupName, "\\") {
 				parts := strings.SplitN(groupName, "\\", 2)
 				req.Domain = parts[0]
@@ -557,7 +660,6 @@ func (c *VCenterCollector) CollectGroupMemberships() {
 
 			memberID := fmt.Sprintf("%s:%s:%s", prefix, c.Config.Host, memberPrincipal)
 
-			// Ensure member node exists
 			parts := strings.Split(memberPrincipal, "\\")
 			var domain, username string
 			if len(parts) > 1 {
@@ -576,7 +678,6 @@ func (c *VCenterCollector) CollectGroupMemberships() {
 				"tags":     []string{},
 			})
 
-			// Edge: Member MEMBER_OF ParentGroup
 			c.Graph.AddEdge("MEMBER_OF", memberID, parentGID, nil)
 		}
 	}

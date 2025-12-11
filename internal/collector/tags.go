@@ -80,7 +80,38 @@ func (tc *TagCollector) Collect() map[string][]string {
 		return client.Do(r)
 	}
 
-	// Get all tags
+	// 1. Get Categories
+	catMap := make(map[string]string) // id -> name
+	resp, err = doReq("GET", baseURL+"/com/vmware/cis/tagging/category")
+	if err == nil {
+		var catList struct {
+			Value []string `json:"value"`
+		}
+		json.NewDecoder(resp.Body).Decode(&catList)
+		resp.Body.Close()
+
+		for _, catID := range catList.Value {
+			resp, err := doReq("GET", fmt.Sprintf("%s/com/vmware/cis/tagging/category/%s", baseURL, catID))
+			if err != nil {
+				continue
+			}
+			var catInfo struct {
+				Value struct {
+					Name string `json:"name"`
+				} `json:"value"`
+			}
+			json.NewDecoder(resp.Body).Decode(&catInfo)
+			resp.Body.Close()
+			if catInfo.Value.Name != "" {
+				catMap[catID] = catInfo.Value.Name
+			}
+		}
+	} else {
+		tc.Logger.Printf("Failed to list tag categories: %v", err)
+	}
+	tc.Debugf("Found %d tag categories", len(catMap))
+
+	// 2. Get Tags
 	resp, err = doReq("GET", baseURL+"/com/vmware/cis/tagging/tag")
 	if err != nil {
 		tc.Logger.Printf("Failed to list tags: %v", err)
@@ -95,18 +126,17 @@ func (tc *TagCollector) Collect() map[string][]string {
 
 	tc.Logger.Printf("Found %d tags", len(tagList.Value))
 
-	// In a real optimized scenario, we could parallelize fetching tag details here too.
-	// For now, simple iteration is often fast enough unless thousands of tags exist.
+	// Iterate tags
 	for _, tagID := range tagList.Value {
-		tc.Debugf("Processing tag ID: %s", tagID)
-		// Get Tag Name
+		// Get Tag Details
 		resp, err = doReq("GET", fmt.Sprintf("%s/com/vmware/cis/tagging/tag/%s", baseURL, tagID))
 		if err != nil {
 			continue
 		}
 		var tagInfo struct {
 			Value struct {
-				Name string `json:"name"`
+				Name       string `json:"name"`
+				CategoryID string `json:"category_id"`
 			} `json:"value"`
 		}
 		json.NewDecoder(resp.Body).Decode(&tagInfo)
@@ -116,7 +146,12 @@ func (tc *TagCollector) Collect() map[string][]string {
 		if tagName == "" {
 			continue
 		}
-		tc.Debugf("Tag Name: %s", tagName)
+
+		// Format: Category:TagName
+		fullTagName := tagName
+		if catName, ok := catMap[tagInfo.Value.CategoryID]; ok {
+			fullTagName = fmt.Sprintf("%s:%s", catName, tagName)
+		}
 
 		// Get Attached Objects
 		resp, err = doReq("POST", fmt.Sprintf("%s/com/vmware/cis/tagging/tag-association/id:%s?~action=list-attached-objects", baseURL, tagID))
@@ -134,10 +169,17 @@ func (tc *TagCollector) Collect() map[string][]string {
 
 		for _, obj := range attached.Value {
 			if obj.ID != "" {
-				tagMap[obj.ID] = append(tagMap[obj.ID], tagName)
+				tagMap[obj.ID] = append(tagMap[obj.ID], fullTagName)
 			}
 		}
-		tc.Debugf("Tag '%s' attached to %d objects", tagName, len(attached.Value))
 	}
+
+	// Debug Logging as requested
+	if tc.Config.Debug {
+		for moid, tags := range tagMap {
+			tc.Debugf("Collected tags for %s: %v", moid, tags)
+		}
+	}
+
 	return tagMap
 }
