@@ -172,22 +172,6 @@
       },
       "label": "Hosts"
     },
-    "vCenter_Mounts": {
-      "style": {
-        "color": "#2196F3",
-        "line": "solid",
-        "width": 1
-      },
-      "label": "Mounts"
-    },
-    "vCenter_HasDatastore": {
-      "style": {
-        "color": "#00BCD4",
-        "line": "dotted",
-        "width": 1
-      },
-      "label": "Has Datastore"
-    },
     "vCenter_UsesDatastore": {
       "style": {
         "color": "#009688",
@@ -196,14 +180,6 @@
       },
       "label": "Uses Storage"
     },
-    "vCenter_HasNetwork": {
-      "style": {
-        "color": "#E91E63",
-        "line": "dotted",
-        "width": 1
-      },
-      "label": "Has Network"
-    },
     "vCenter_UsesNetwork": {
       "style": {
         "color": "#9C27B0",
@@ -211,22 +187,6 @@
         "width": 1
       },
       "label": "Uses Network"
-    },
-    "vCenter_HasRole": {
-      "style": {
-        "color": "#FF5722",
-        "line": "solid",
-        "width": 2
-      },
-      "label": "Has Role"
-    },
-    "vCenter_AssignedTo": {
-      "style": {
-        "color": "#795548",
-        "line": "solid",
-        "width": 2
-      },
-      "label": "Assigned To"
     },
     "vCenter_MemberOf": {
       "style": {
@@ -243,6 +203,14 @@
         "width": 1
       },
       "label": "Has Privilege"
+    },
+    "vCenter_HasPermission": {
+      "style": {
+        "color": "#FF5722",
+        "line": "solid",
+        "width": 2
+      },
+      "label": "Has Permission"
     },
     "SyncsTovCenterUser": {
       "style": {

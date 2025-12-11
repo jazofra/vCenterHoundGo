@@ -17,16 +17,19 @@ type GraphNode struct {
 
 // GraphEdge represents an edge in the graph
 type GraphEdge struct {
-	Kind       string         `json:"kind"`
-	StartID    string         `json:"start"`
-	EndID      string         `json:"end"`
-	Properties map[string]any `json:"properties"`
+	Kind         string         `json:"kind"`
+	StartID      string         `json:"start"`
+	StartMatchBy string         `json:"-"` // Internal use, not direct JSON
+	EndID        string         `json:"end"`
+	EndMatchBy   string         `json:"-"` // Internal use, not direct JSON
+	Properties   map[string]any `json:"properties"`
 }
 
 // MarshalJSON custom marshaling for Edge to match BloodHound format
 func (e GraphEdge) MarshalJSON() ([]byte, error) {
 	type EdgeValue struct {
-		Value string `json:"value"`
+		Value   string `json:"value"`
+		MatchBy string `json:"match_by,omitempty"`
 	}
 	return json.Marshal(&struct {
 		Kind       string         `json:"kind"`
@@ -34,9 +37,15 @@ func (e GraphEdge) MarshalJSON() ([]byte, error) {
 		End        EdgeValue      `json:"end"`
 		Properties map[string]any `json:"properties"`
 	}{
-		Kind:       e.Kind,
-		Start:      EdgeValue{Value: e.StartID},
-		End:        EdgeValue{Value: e.EndID},
+		Kind: e.Kind,
+		Start: EdgeValue{
+			Value:   e.StartID,
+			MatchBy: e.StartMatchBy,
+		},
+		End: EdgeValue{
+			Value:   e.EndID,
+			MatchBy: e.EndMatchBy,
+		},
 		Properties: e.Properties,
 	})
 }
@@ -171,15 +180,20 @@ func (gb *Builder) AddRawNode(kinds []string, id string, props map[string]any) {
 
 // AddEdge adds an edge to the graph (Thread-Safe) - applies vCenter prefix
 func (gb *Builder) AddEdge(kind, startID, endID string, props map[string]any) {
-	gb.addEdgeInternal(gb.FormatEdgeKind(kind), startID, endID, props)
+	gb.addEdgeInternal(gb.FormatEdgeKind(kind), startID, "", endID, "", props)
 }
 
 // AddRawEdge adds an edge to the graph without prefixing the kind
 func (gb *Builder) AddRawEdge(kind, startID, endID string, props map[string]any) {
-	gb.addEdgeInternal(kind, startID, endID, props)
+	gb.addEdgeInternal(kind, startID, "", endID, "", props)
 }
 
-func (gb *Builder) addEdgeInternal(kind, startID, endID string, props map[string]any) {
+// AddRawEdgeWithMatch adds an edge with specific match_by criteria
+func (gb *Builder) AddRawEdgeWithMatch(kind, startID, startMatch, endID, endMatch string, props map[string]any) {
+	gb.addEdgeInternal(kind, startID, startMatch, endID, endMatch, props)
+}
+
+func (gb *Builder) addEdgeInternal(kind, startID, startMatch, endID, endMatch string, props map[string]any) {
 	if props == nil {
 		props = make(map[string]any)
 	}
@@ -196,7 +210,8 @@ func (gb *Builder) addEdgeInternal(kind, startID, endID string, props map[string
 		propStr.WriteString(fmt.Sprintf("%s:%v|", k, props[k]))
 	}
 
-	edgeKey := fmt.Sprintf("%s:%s:%s:%s", kind, startID, endID, propStr.String())
+	// Include match_by in the key to ensure uniqueness if needed (though unlikely to overlap with same IDs)
+	edgeKey := fmt.Sprintf("%s:%s:%s:%s:%s:%s", kind, startID, startMatch, endID, endMatch, propStr.String())
 
 	gb.mu.Lock()
 	defer gb.mu.Unlock()
@@ -207,10 +222,12 @@ func (gb *Builder) addEdgeInternal(kind, startID, endID string, props map[string
 	gb.edgeKeys[edgeKey] = true
 
 	gb.edges = append(gb.edges, GraphEdge{
-		Kind:       kind,
-		StartID:    startID,
-		EndID:      endID,
-		Properties: props,
+		Kind:         kind,
+		StartID:      startID,
+		StartMatchBy: startMatch,
+		EndID:        endID,
+		EndMatchBy:   endMatch,
+		Properties:   props,
 	})
 }
 
