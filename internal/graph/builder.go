@@ -12,7 +12,7 @@ import (
 type GraphNode struct {
 	Kinds      []string       `json:"kinds"`
 	ID         string         `json:"id"`
-	Properties map[string]any `json:"properties"`
+	Properties map[string]any `json:"properties,omitempty"`
 }
 
 // GraphEdge represents an edge in the graph
@@ -29,24 +29,41 @@ type GraphEdge struct {
 func (e GraphEdge) MarshalJSON() ([]byte, error) {
 	type EdgeValue struct {
 		Value   string `json:"value"`
-		MatchBy string `json:"match_by,omitempty"`
+		MatchBy string `json:"match_by"`
 	}
+
+	// Convert empty properties map to nil for cleaner JSON output
+	var props map[string]any
+	if len(e.Properties) > 0 {
+		props = e.Properties
+	}
+
+	// Default to "id" if match_by is not specified
+	startMatchBy := e.StartMatchBy
+	if startMatchBy == "" {
+		startMatchBy = "id"
+	}
+	endMatchBy := e.EndMatchBy
+	if endMatchBy == "" {
+		endMatchBy = "id"
+	}
+
 	return json.Marshal(&struct {
 		Kind       string         `json:"kind"`
 		Start      EdgeValue      `json:"start"`
 		End        EdgeValue      `json:"end"`
-		Properties map[string]any `json:"properties"`
+		Properties map[string]any `json:"properties,omitempty"`
 	}{
 		Kind: e.Kind,
 		Start: EdgeValue{
 			Value:   e.StartID,
-			MatchBy: e.StartMatchBy,
+			MatchBy: startMatchBy,
 		},
 		End: EdgeValue{
 			Value:   e.EndID,
-			MatchBy: e.EndMatchBy,
+			MatchBy: endMatchBy,
 		},
-		Properties: e.Properties,
+		Properties: props,
 	})
 }
 

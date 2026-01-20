@@ -6,14 +6,23 @@ import (
 	"vcenterhoundgo/internal/graph"
 )
 
+// Metadata contains optional metadata for the output file
+type Metadata struct {
+	SourceKind string `json:"source_kind"`
+}
+
 // Output structure for JSON file
 type Output struct {
-	Graph graph.GraphData `json:"graph"`
+	Metadata Metadata        `json:"metadata"`
+	Graph    graph.GraphData `json:"graph"`
 }
 
 // WriteToFile writes the graph data to a JSON file
 func WriteToFile(data graph.GraphData, filename string) error {
 	out := Output{
+		Metadata: Metadata{
+			SourceKind: "vCenterHound",
+		},
 		Graph: data,
 	}
 
