@@ -308,8 +308,8 @@ func (c *VCenterCollector) collectEntities(kind string, props []string) {
 				gst := vm.Guest
 				props["hostName"] = gst.HostName
 				// ipAddress is single, but user requested ipAddresses[]
-				var ips []string
-				var macs []string
+				ips := make([]string, 0)
+				macs := make([]string, 0)
 				if gst.Net != nil {
 					for _, nic := range gst.Net {
 						if nic.IpAddress != nil {
@@ -431,7 +431,7 @@ func (c *VCenterCollector) CollectPermissions() {
 	for _, role := range roles {
 		roleID := fmt.Sprintf("role:%s:%d", c.Config.Host, role.RoleId)
 
-		var groups []string
+		groups := make([]string, 0)
 		seenGroups := make(map[string]bool)
 
 		for _, privStr := range role.Privilege {
@@ -461,10 +461,10 @@ func (c *VCenterCollector) CollectPermissions() {
 			}
 
 			c.Graph.EnsureNode([]string{"Privilege"}, privID, map[string]any{
-				"name":        privName,
-				"privId":      privStr,
-				"group":       privGroup,
-				"tags":        []string{},
+				"name":   privName,
+				"privId": privStr,
+				"group":  privGroup,
+				"tags":   []string{},
 			})
 			c.Graph.AddEdge("HAS_PRIVILEGE", roleID, privID, nil)
 		}
