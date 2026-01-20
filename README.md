@@ -12,6 +12,7 @@ Export vCenter data (hosts, VMs, permissions, users, groups, tags) into a BloodH
     *   **Permissions**: Roles, Privileges, Users, Groups, and complex permission assignments.
     *   **Tags**: vCenter Tags collected via REST API (associated with VMs/Hosts).
 *   **Active Directory Sync**: Automatically links vCenter users/groups to Active Directory nodes in BloodHound by resolving NetBIOS domains to FQDNs via BloodHound Enterprise API.
+*   **Computer-to-VM Mapping**: Links AD Computer objects to their corresponding vCenter VMs and ESXi Hosts (similar to CyberArkHound's `--target-domains`).
 *   **Group Memberships**: Resolves nested group memberships including SSO and local groups.
 *   **BloodHound Compatible**: Generates a standard graph JSON file with custom nodes/edges defined in `model.json`.
 
@@ -43,7 +44,7 @@ Before importing data, you must register the custom node/edge types in BloodHoun
 ```
 
 **With Active Directory Sync (BloodHound Enterprise):**
-This mode fetches available domains from BloodHound to map vCenter NetBIOS names (e.g., `CORP`) to FQDNs (e.g., `CORP.LOCAL`), creating `SyncsTovCenterUser` edges.
+This mode fetches available domains from BloodHound to map vCenter NetBIOS names (e.g., `CORP`) to FQDNs (e.g., `CORP.LOCAL`), creating `SyncsTovCenterUser` and `SyncsTovCenterGroup` edges.
 
 ```bash
 ./vCenterHound \
@@ -55,6 +56,36 @@ This mode fetches available domains from BloodHound to map vCenter NetBIOS names
   --bh-key-secret "YOUR_KEY_SECRET"
 ```
 
+**With Computer-to-VM Mapping (Static Mode):**
+This mode links AD Computer objects to vCenter VMs/Hosts by matching hostnames. Uses the target domain suffix to construct the expected AD object ID. Fast but may include false positives for computers not in AD.
+
+```bash
+./vCenterHound \
+  -s vc.example.com \
+  -u administrator@vsphere.local \
+  -p "Password!" \
+  --bh-url https://bloodhound.example.com \
+  --bh-key-id "YOUR_KEY_ID" \
+  --bh-key-secret "YOUR_KEY_SECRET" \
+  --sync-computers \
+  --target-domains "CORP.LOCAL,PROD.EXAMPLE.COM"
+```
+
+**With Computer-to-VM Mapping (API Mode):**
+This mode queries BloodHound API to verify computers exist before creating edges. Slower but more accurate - only creates edges for computers that actually exist in AD.
+
+```bash
+./vCenterHound \
+  -s vc.example.com \
+  -u administrator@vsphere.local \
+  -p "Password!" \
+  --bh-url https://bloodhound.example.com \
+  --bh-key-id "YOUR_KEY_ID" \
+  --bh-key-secret "YOUR_KEY_SECRET" \
+  --sync-computers-api \
+  --target-domains "CORP.LOCAL"
+```
+
 **Debug Mode:**
 Enable detailed logging and stats.
 ```bash
@@ -63,15 +94,20 @@ Enable detailed logging and stats.
 
 ### Command-Line Arguments
 
-*   `-s`: vCenter server(s) (comma-separated).
-*   `-u`: vCenter username.
-*   `-p`: vCenter password.
-*   `-P`: vCenter port (default 443).
-*   `-o`: Output file path (default `vcenter_graph.json`).
-*   `--debug`: Enable debug logging.
-*   `--bh-url`: BloodHound Enterprise URL (for AD sync).
-*   `--bh-key-id`: BloodHound API Key ID.
-*   `--bh-key-secret`: BloodHound API Key Secret.
+| Argument | Description | Default |
+|----------|-------------|---------|
+| `-s` | vCenter server(s), comma-separated | (required) |
+| `-u` | vCenter username | (required) |
+| `-p` | vCenter password | (required) |
+| `-P` | vCenter port | `443` |
+| `-o` | Output file path | `vcenter_graph.json` |
+| `--debug` | Enable debug logging and extended summary | `false` |
+| `--bh-url` | BloodHound Enterprise URL (for AD sync) | |
+| `--bh-key-id` | BloodHound API Key ID | |
+| `--bh-key-secret` | BloodHound API Key Secret | |
+| `--target-domains` | Comma-separated list of target AD domains for computer sync (e.g., `CORP.LOCAL,PROD.EXAMPLE.COM`) | |
+| `--sync-computers` | Enable syncing VMs/Hosts to AD Computers using static name matching | `false` |
+| `--sync-computers-api` | Use BloodHound API to fetch and verify computers (slower but more accurate) | `false` |
 
 ## Node Types
 
@@ -100,7 +136,7 @@ The tool generates the following node types:
 
 | Edge Type | Source | Target | Description |
 |-----------|--------|--------|-------------|
-| `vCenter_Contains` | Container | Entity | Hierarchical containment (e.g., Folder->DC, DC->Cluster). |
+| `vCenter_Contains` | Container | Entity | Hierarchical containment (e.g., Folder→DC, DC→Cluster, Cluster→VM). |
 | `vCenter_Hosts` | vCenter_ESXiHost | vCenter_VM | Indicates which host is running the VM. |
 | `vCenter_UsesDatastore` | vCenter_VM | vCenter_Datastore | VM storage dependency. |
 | `vCenter_UsesNetwork` | vCenter_VM | vCenter_Network / DVPortgroup | VM network connection. |
@@ -108,7 +144,9 @@ The tool generates the following node types:
 | `vCenter_HasPrivilege` | vCenter_Role | vCenter_Privilege | Links a Role to its defined privileges. |
 | `vCenter_MemberOf` | vCenter_User / Group | vCenter_Group | Group membership within vCenter. |
 | `SyncsTovCenterUser` | User (AD) | vCenter_User | Links an AD User to its corresponding vCenter Principal. |
-| `SyncsTovCenterGroup` | Group (AD)| vCenter_Group| Links an AD Group to its corresponding vCenter Principal. |
+| `SyncsTovCenterGroup` | Group (AD) | vCenter_Group | Links an AD Group to its corresponding vCenter Principal. |
+| `RepresentsVM` | Computer (AD) | vCenter_VM | Links an AD Computer to its corresponding vCenter VM. |
+| `RepresentsHost` | Computer (AD) | vCenter_ESXiHost | Links an AD Computer to its corresponding ESXi Host. |
 
 ## Data Flow Diagram
 
@@ -119,6 +157,7 @@ flowchart TD
     %% External AD Nodes
     ADUser["fa:fa-user User (AD)"]
     ADGroup["fa:fa-users Group (AD)"]
+    ADComputer["fa:fa-desktop Computer (AD)"]
 
     %% vCenter Principals & Permissions
     VCUser["fa:fa-user vCenter_User"]
@@ -151,14 +190,23 @@ flowchart TD
     DVS["fa:fa-project-diagram vCenter_DVSwitch"]
     DVPG["fa:fa-share-nodes vCenter_DVPortgroup"]
 
+    %% Computer-to-VM/Host Mapping
+    ADComputer -. RepresentsVM .-> VM
+    ADComputer -. RepresentsHost .-> Host
+
     %% Hierarchy Edges
     VC -- vCenter_Contains --> Root
     Root -- vCenter_Contains --> Folder
+    Root -- vCenter_Contains --> DC
     Folder -- vCenter_Contains --> DC
     DC -- vCenter_Contains --> Cluster
+    DC -- vCenter_Contains --> DS
+    DC -- vCenter_Contains --> Net
+    DC -- vCenter_Contains --> DVS
     Cluster -- vCenter_Contains --> Host
-    Host -- vCenter_Hosts --> VM
     Cluster -- vCenter_Contains --> Pool
+    Host -- vCenter_Contains --> VM
+    Host -- vCenter_Hosts --> VM
     Pool -- vCenter_Contains --> VM
 
     %% Dependencies
@@ -174,10 +222,12 @@ flowchart TD
     %% Styling
     style ADUser fill:#17E625,stroke:#0B8A14,stroke-width:2px
     style ADGroup fill:#FFED29,stroke:#CCB900,stroke-width:2px
+    style ADComputer fill:#FF6B6B,stroke:#CC5555,stroke-width:2px
     style VCUser fill:#FF8E40,stroke:#CC7133,stroke-width:2px
     style VCGroup fill:#C06EFF,stroke:#9A58CC,stroke-width:2px
     style VM fill:#9EECFF,stroke:#7EBCCF,stroke-width:2px
     style VC fill:#00E5FF,stroke:#00B2CC,stroke-width:2px
+    style Host fill:#FFB86C,stroke:#CC9356,stroke-width:2px
 ```
 
 ## Useful Cypher Queries
@@ -230,6 +280,30 @@ Simple infrastructure mapping.
 ```cypher
 MATCH (h:vCenter_ESXiHost)-[:vCenter_Hosts]->(vm:vCenter_VM)
 RETURN h.name, count(vm) as VMCount, collect(vm.name) as VMs
+```
+
+### 7. Find AD Computers that Represent VMs
+Show which AD computer objects map to vCenter VMs.
+
+```cypher
+MATCH (c:Computer)-[:RepresentsVM]->(vm:vCenter_VM)
+RETURN c.name as ADComputer, vm.name as VMName
+```
+
+### 8. Find Attack Path: AD Computer to vCenter VM Permissions
+Identify paths where compromising an AD computer could lead to vCenter access.
+
+```cypher
+MATCH (c:Computer)-[:RepresentsVM]->(vm:vCenter_VM)<-[:vCenter_HasPermission]-(u:vCenter_User)<-[:SyncsTovCenterUser]-(ad:User)
+RETURN c.name as Computer, vm.name as VM, ad.name as ADUser
+```
+
+### 9. Find ESXi Hosts with AD Computer Objects
+Show which ESXi hosts are domain-joined.
+
+```cypher
+MATCH (c:Computer)-[:RepresentsHost]->(h:vCenter_ESXiHost)
+RETURN c.name as ADComputer, h.name as ESXiHost
 ```
 
 ## Acknowledgments

@@ -143,6 +143,32 @@ func (gb *Builder) EnsureNode(kinds []string, id string, props map[string]any) {
 	if existing, ok := gb.nodesByID[id]; ok {
 		// Update existing properties
 		for k, v := range props {
+			// Special handling for tags: merge or update if new value has content
+			if k == "tags" {
+				newTags, newOk := v.([]string)
+				existingTags, existingOk := existing.Properties[k].([]string)
+				if newOk && len(newTags) > 0 {
+					if existingOk && len(existingTags) > 0 {
+						// Merge tags, avoiding duplicates
+						tagSet := make(map[string]bool)
+						for _, t := range existingTags {
+							tagSet[t] = true
+						}
+						for _, t := range newTags {
+							tagSet[t] = true
+						}
+						merged := make([]string, 0, len(tagSet))
+						for t := range tagSet {
+							merged = append(merged, t)
+						}
+						existing.Properties[k] = merged
+					} else {
+						existing.Properties[k] = newTags
+					}
+				}
+				continue
+			}
+			// For other properties, only add if doesn't exist
 			if _, exists := existing.Properties[k]; !exists {
 				existing.Properties[k] = v
 			}

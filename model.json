@@ -227,6 +227,22 @@
         "width": 1
       },
       "label": "Syncs To vCenter Group"
+    },
+    "RepresentsVM": {
+      "style": {
+        "color": "#FF6B6B",
+        "line": "dashed",
+        "width": 2
+      },
+      "label": "Represents VM"
+    },
+    "RepresentsHost": {
+      "style": {
+        "color": "#FFB86C",
+        "line": "dashed",
+        "width": 2
+      },
+      "label": "Represents Host"
     }
   },
   "metadata": {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"time"
 	"vcenterhoundgo/internal/config"
 )
@@ -91,8 +92,11 @@ func (tc *TagCollector) Collect() map[string][]string {
 		resp.Body.Close()
 
 		for _, catID := range catList.Value {
-			resp, err := doReq("GET", fmt.Sprintf("%s/com/vmware/cis/tagging/category/%s", baseURL, catID))
+			// URL-encode the category ID for URN format IDs and use id: prefix
+			encodedCatID := url.PathEscape(catID)
+			resp, err := doReq("GET", fmt.Sprintf("%s/com/vmware/cis/tagging/category/id:%s", baseURL, encodedCatID))
 			if err != nil {
+				tc.Debugf("Failed to get category %s: %v", catID, err)
 				continue
 			}
 			var catInfo struct {
@@ -104,6 +108,7 @@ func (tc *TagCollector) Collect() map[string][]string {
 			resp.Body.Close()
 			if catInfo.Value.Name != "" {
 				catMap[catID] = catInfo.Value.Name
+				tc.Debugf("Category: %s -> %s", catID, catInfo.Value.Name)
 			}
 		}
 	} else {
@@ -128,9 +133,11 @@ func (tc *TagCollector) Collect() map[string][]string {
 
 	// Iterate tags
 	for _, tagID := range tagList.Value {
-		// Get Tag Details
-		resp, err = doReq("GET", fmt.Sprintf("%s/com/vmware/cis/tagging/tag/%s", baseURL, tagID))
+		// Get Tag Details - URL-encode for URN format IDs
+		encodedTagID := url.PathEscape(tagID)
+		resp, err = doReq("GET", fmt.Sprintf("%s/com/vmware/cis/tagging/tag/id:%s", baseURL, encodedTagID))
 		if err != nil {
+			tc.Debugf("Failed to get tag %s: %v", tagID, err)
 			continue
 		}
 		var tagInfo struct {
@@ -153,19 +160,23 @@ func (tc *TagCollector) Collect() map[string][]string {
 			fullTagName = fmt.Sprintf("%s:%s", catName, tagName)
 		}
 
-		// Get Attached Objects
-		resp, err = doReq("POST", fmt.Sprintf("%s/com/vmware/cis/tagging/tag-association/id:%s?~action=list-attached-objects", baseURL, tagID))
+		// Get Attached Objects - URL-encode for URN format IDs
+		resp, err = doReq("POST", fmt.Sprintf("%s/com/vmware/cis/tagging/tag-association/id:%s?~action=list-attached-objects", baseURL, encodedTagID))
 		if err != nil {
+			tc.Debugf("Failed to get tag associations for %s: %v", tagID, err)
 			continue
 		}
 
 		var attached struct {
 			Value []struct {
-				ID string `json:"id"` // moid
+				ID   string `json:"id"`   // moid
+				Type string `json:"type"` // entity type
 			} `json:"value"`
 		}
 		json.NewDecoder(resp.Body).Decode(&attached)
 		resp.Body.Close()
+
+		tc.Debugf("Tag '%s' has %d attached objects", fullTagName, len(attached.Value))
 
 		for _, obj := range attached.Value {
 			if obj.ID != "" {

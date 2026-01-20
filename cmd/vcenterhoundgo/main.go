@@ -29,6 +29,11 @@ func main() {
 	bhKeyID := flag.String("bh-key-id", "", "BloodHound Key ID")
 	bhKeySecret := flag.String("bh-key-secret", "", "BloodHound Key Secret")
 
+	// Computer Sync
+	targetDomains := flag.String("target-domains", "", "Comma-separated list of target AD domains for computer sync (e.g., VMS.AD.VARIAN.COM,CORP.EXAMPLE.COM)")
+	syncComputers := flag.Bool("sync-computers", false, "Enable syncing VMs/Hosts to AD Computers using target domains")
+	syncComputersAPI := flag.Bool("sync-computers-api", false, "Use BloodHound API to fetch computers (slower but more accurate)")
+
 	flag.Parse()
 
 	if *server == "" || *user == "" || *password == "" {
@@ -39,9 +44,10 @@ func main() {
 
 	// Resolve Domains if BH config provided
 	var domainMap map[string]string
+	var bhClient *bloodhound.Client
 	if *bhURL != "" && *bhKeyID != "" && *bhKeySecret != "" {
 		log.Println("Connecting to BloodHound to fetch domain map...")
-		bhClient := bloodhound.NewClient(*bhURL, *bhKeyID, *bhKeySecret)
+		bhClient = bloodhound.NewClient(*bhURL, *bhKeyID, *bhKeySecret)
 		dMap, err := bhClient.GetDomainMap()
 		if err != nil {
 			log.Printf("Warning: Failed to fetch domains from BloodHound: %v. Sync edges will be skipped.", err)
@@ -56,6 +62,31 @@ func main() {
 		}
 	} else {
 		log.Println("BloodHound credentials not provided. Sync edges will be skipped.")
+	}
+
+	// Parse target domains
+	var targetDomainsList []string
+	if *targetDomains != "" {
+		for _, d := range strings.Split(*targetDomains, ",") {
+			d = strings.TrimSpace(d)
+			if d != "" {
+				targetDomainsList = append(targetDomainsList, strings.ToUpper(d))
+			}
+		}
+		log.Printf("Target domains for computer sync: %v", targetDomainsList)
+	}
+
+	// Fetch computers from BloodHound if API sync is enabled
+	var computerMap map[string]string // hostname -> objectid
+	if *syncComputersAPI && bhClient != nil && len(targetDomainsList) > 0 {
+		log.Println("Fetching computers from BloodHound API (this may take a while)...")
+		cMap, err := bhClient.GetComputerMap(targetDomainsList)
+		if err != nil {
+			log.Printf("Warning: Failed to fetch computers from BloodHound: %v", err)
+		} else {
+			computerMap = cMap
+			log.Printf("Retrieved %d computers from BloodHound", len(computerMap))
+		}
 	}
 
 	hosts := strings.Split(*server, ",")
@@ -75,18 +106,21 @@ func main() {
 		}
 
 		cfg := config.Config{
-			Host:        host,
-			User:        *user,
-			Password:    *password,
-			Port:        *port,
-			OutputPath:  *outPath,
-			Debug:       *debug,
-			BHURL:       *bhURL,
-			BHKeyID:     *bhKeyID,
-			BHKeySecret: *bhKeySecret,
+			Host:              host,
+			User:              *user,
+			Password:          *password,
+			Port:              *port,
+			OutputPath:        *outPath,
+			Debug:             *debug,
+			BHURL:             *bhURL,
+			BHKeyID:           *bhKeyID,
+			BHKeySecret:       *bhKeySecret,
+			TargetDomains:     targetDomainsList,
+			SyncComputers:     *syncComputers || *syncComputersAPI,
+			SyncComputersAPI:  *syncComputersAPI,
 		}
 
-		col := collector.NewCollector(cfg, gb, domainMap)
+		col := collector.NewCollector(cfg, gb, domainMap, computerMap)
 		if err := col.Connect(); err != nil {
 			log.Printf("Failed to connect to %s: %v", host, err)
 			continue

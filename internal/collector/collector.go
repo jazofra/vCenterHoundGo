@@ -23,25 +23,30 @@ import (
 )
 
 type VCenterCollector struct {
-	Config    config.Config
-	Client    *govmomi.Client
-	Context   context.Context
-	Graph     *graph.Builder
-	TagMap    map[string][]string
-	DomainMap map[string]string // NetBIOS -> FQDN
-	Logger    *log.Logger
+	Config      config.Config
+	Client      *govmomi.Client
+	Context     context.Context
+	Graph       *graph.Builder
+	TagMap      map[string][]string
+	DomainMap   map[string]string // NetBIOS -> FQDN
+	ComputerMap map[string]string // hostname -> objectid (from BloodHound API)
+	Logger      *log.Logger
 }
 
-func NewCollector(cfg config.Config, gb *graph.Builder, domainMap map[string]string) *VCenterCollector {
+func NewCollector(cfg config.Config, gb *graph.Builder, domainMap map[string]string, computerMap map[string]string) *VCenterCollector {
 	if domainMap == nil {
 		domainMap = make(map[string]string)
 	}
+	if computerMap == nil {
+		computerMap = make(map[string]string)
+	}
 	return &VCenterCollector{
-		Config:    cfg,
-		Graph:     gb,
-		TagMap:    make(map[string][]string),
-		DomainMap: domainMap,
-		Logger:    log.New(os.Stdout, "vCenterHound: ", log.Ldate|log.Ltime),
+		Config:      cfg,
+		Graph:       gb,
+		TagMap:      make(map[string][]string),
+		DomainMap:   domainMap,
+		ComputerMap: computerMap,
+		Logger:      log.New(os.Stdout, "vCenterHound: ", log.Ldate|log.Ltime),
 	}
 }
 
@@ -105,6 +110,70 @@ func (c *VCenterCollector) ensureNodeWithTags(kinds []string, id string, props m
 		props["tags"] = []string{}
 	}
 	c.Graph.EnsureNode(kinds, id, props)
+}
+
+// tryComputerSync attempts to create a RepresentsVM or RepresentsHost edge from an AD Computer to a vCenter VM/Host.
+// It returns true if a match was found.
+// hostname: the guest hostname or ESXi FQDN (e.g., "PUPUENGWS001.vms.ad.varian.com")
+// nodeID: the vCenter node ID (e.g., "vm:vcenter:vm-12345")
+// edgeKind: "RepresentsVM" or "RepresentsHost"
+func (c *VCenterCollector) tryComputerSync(hostname string, nodeID string, edgeKind string) bool {
+	if !c.Config.SyncComputers || hostname == "" {
+		return false
+	}
+
+	hostname = strings.ToUpper(hostname)
+	shortName := strings.Split(hostname, ".")[0]
+
+	// Try to match using the ComputerMap if we have it (API mode)
+	if len(c.ComputerMap) > 0 {
+		// Try full hostname first, then short name
+		if objectID, ok := c.ComputerMap[hostname]; ok {
+			c.Debugf("Syncing AD Computer %s to vCenter node %s (API match)", hostname, nodeID)
+			c.Graph.AddRawEdgeWithMatch(edgeKind, objectID, "objectid", nodeID, "", nil)
+			return true
+		}
+		if objectID, ok := c.ComputerMap[shortName]; ok {
+			c.Debugf("Syncing AD Computer %s to vCenter node %s (API match - short name)", shortName, nodeID)
+			c.Graph.AddRawEdgeWithMatch(edgeKind, objectID, "objectid", nodeID, "", nil)
+			return true
+		}
+		return false
+	}
+
+	// Static mode: generate the expected AD Computer name and create the edge
+	// Try to determine the domain from the hostname
+	var computerFQDN string
+	parts := strings.Split(hostname, ".")
+
+	if len(parts) > 1 {
+		// Hostname already has a domain, use it
+		computerFQDN = hostname
+	} else if len(c.Config.TargetDomains) > 0 {
+		// Use the first target domain
+		computerFQDN = shortName + "." + c.Config.TargetDomains[0]
+	} else {
+		// No domain info available
+		return false
+	}
+
+	// Verify the domain is in our target domains list
+	hostDomain := strings.ToUpper(strings.Join(parts[1:], "."))
+	domainMatch := false
+	for _, d := range c.Config.TargetDomains {
+		if strings.EqualFold(hostDomain, d) || len(parts) == 1 {
+			domainMatch = true
+			break
+		}
+	}
+
+	if !domainMatch && len(parts) > 1 {
+		return false
+	}
+
+	c.Debugf("Syncing AD Computer %s to vCenter node %s (static match)", computerFQDN, nodeID)
+	c.Graph.AddRawEdgeWithMatch(edgeKind, computerFQDN, "name", nodeID, "", nil)
+	return true
 }
 
 // --- Infrastructure ---
@@ -267,6 +336,10 @@ func (c *VCenterCollector) collectEntities(kind string, props []string) {
 			if h.Parent != nil && h.Parent.Type == "ClusterComputeResource" {
 				c.Graph.AddEdge("CONTAINS", c.makeID("cluster", h.Parent.Value), id, nil)
 			}
+
+			// Try to sync ESXi host to AD Computer
+			// ESXi hosts usually have FQDN as their name (e.g., pu-esx01.vms.ad.varian.com)
+			c.tryComputerSync(h.Name, id, "RepresentsHost")
 		}
 	case "VirtualMachine":
 		var vms []mo.VirtualMachine
@@ -335,6 +408,12 @@ func (c *VCenterCollector) collectEntities(kind string, props []string) {
 
 			c.ensureNodeWithTags([]string{"VM"}, id, props, vm.Reference().Value)
 
+			// Add CONTAINS edge from parent folder to VM
+			if vm.Parent != nil {
+				parentKind := c.mapEntityType(vm.Parent.Type)
+				c.Graph.AddEdge("CONTAINS", c.makeID(parentKind, vm.Parent.Value), id, nil)
+			}
+
 			if vm.Runtime.Host != nil {
 				c.Graph.AddEdge("HOSTS", c.makeID("esxi_host", vm.Runtime.Host.Value), id, nil)
 			}
@@ -348,6 +427,11 @@ func (c *VCenterCollector) collectEntities(kind string, props []string) {
 				}
 				c.Graph.AddEdge("USES_NETWORK", id, c.makeID(netKind, net.Value), nil)
 			}
+
+			// Try to sync VM to AD Computer using guest hostname
+			if vm.Guest != nil && vm.Guest.HostName != "" {
+				c.tryComputerSync(vm.Guest.HostName, id, "RepresentsVM")
+			}
 		}
 	case "Datastore":
 		var dss []mo.Datastore
@@ -360,6 +444,11 @@ func (c *VCenterCollector) collectEntities(kind string, props []string) {
 			props["capacity"] = ds.Summary.Capacity
 			props["freeSpace"] = ds.Summary.FreeSpace
 			c.ensureNodeWithTags([]string{"Datastore"}, id, props, ds.Reference().Value)
+			// Datastores are usually contained in a datastore folder under a datacenter
+			if ds.Parent != nil {
+				parentKind := c.mapEntityType(ds.Parent.Type)
+				c.Graph.AddEdge("CONTAINS", c.makeID(parentKind, ds.Parent.Value), id, nil)
+			}
 		}
 	case "Network":
 		var nets []mo.Network
@@ -367,6 +456,11 @@ func (c *VCenterCollector) collectEntities(kind string, props []string) {
 		for _, net := range nets {
 			id := c.makeID("network", net.Reference().Value)
 			c.ensureNodeWithTags([]string{"Network"}, id, map[string]any{"name": net.Name, "moid": net.Reference().Value, "type": "Network"}, net.Reference().Value)
+			// Networks are contained in a network folder under a datacenter
+			if net.Parent != nil {
+				parentKind := c.mapEntityType(net.Parent.Type)
+				c.Graph.AddEdge("CONTAINS", c.makeID(parentKind, net.Parent.Value), id, nil)
+			}
 		}
 	case "DistributedVirtualPortgroup":
 		var dvps []mo.DistributedVirtualPortgroup
@@ -374,6 +468,10 @@ func (c *VCenterCollector) collectEntities(kind string, props []string) {
 		for _, dvp := range dvps {
 			id := c.makeID("dvportgroup", dvp.Reference().Value)
 			c.ensureNodeWithTags([]string{"DVPortgroup", "Network"}, id, map[string]any{"name": dvp.Name, "moid": dvp.Reference().Value, "type": "DistributedVirtualPortgroup"}, dvp.Reference().Value)
+			// DVPortgroups are contained in the network folder but belong to a DVSwitch
+			if dvp.Config.DistributedVirtualSwitch != nil {
+				c.Graph.AddEdge("CONTAINS", c.makeID("dvswitch", dvp.Config.DistributedVirtualSwitch.Value), id, nil)
+			}
 		}
 	case "VmwareDistributedVirtualSwitch":
 		var dvss []mo.VmwareDistributedVirtualSwitch
@@ -381,6 +479,11 @@ func (c *VCenterCollector) collectEntities(kind string, props []string) {
 		for _, dvs := range dvss {
 			id := c.makeID("dvswitch", dvs.Reference().Value)
 			c.ensureNodeWithTags([]string{"DVSwitch"}, id, map[string]any{"name": dvs.Name, "moid": dvs.Reference().Value}, dvs.Reference().Value)
+			// DVSwitches are contained in a network folder
+			if dvs.Parent != nil {
+				parentKind := c.mapEntityType(dvs.Parent.Type)
+				c.Graph.AddEdge("CONTAINS", c.makeID(parentKind, dvs.Parent.Value), id, nil)
+			}
 		}
 	case "ResourcePool":
 		var rps []mo.ResourcePool
@@ -388,8 +491,10 @@ func (c *VCenterCollector) collectEntities(kind string, props []string) {
 		for _, rp := range rps {
 			id := c.makeID("resource_pool", rp.Reference().Value)
 			c.ensureNodeWithTags([]string{"ResourcePool"}, id, map[string]any{"name": rp.Name, "moid": rp.Reference().Value}, rp.Reference().Value)
-			if rp.Parent != nil && rp.Parent.Type == "ResourcePool" {
-				c.Graph.AddEdge("CONTAINS", c.makeID("resource_pool", rp.Parent.Value), id, nil)
+			if rp.Parent != nil {
+				// ResourcePools can be nested under other ResourcePools, or under a Cluster/Host
+				parentKind := c.mapEntityType(rp.Parent.Type)
+				c.Graph.AddEdge("CONTAINS", c.makeID(parentKind, rp.Parent.Value), id, nil)
 			}
 		}
 	}
@@ -565,6 +670,8 @@ func (c *VCenterCollector) mapEntityType(vimType string) string {
 		return "esxi_host"
 	case "ClusterComputeResource":
 		return "cluster"
+	case "ComputeResource":
+		return "cluster" // Standalone hosts use ComputeResource as parent
 	case "Datacenter":
 		return "datacenter"
 	case "Datastore":
