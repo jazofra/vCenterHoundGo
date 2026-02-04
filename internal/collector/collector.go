@@ -224,10 +224,12 @@ func (c *VCenterCollector) CollectInfrastructure() {
 		{"HostSystem", []string{"name", "parent", "vm", "datastore", "network", "summary", "config.product", "runtime"}},
 		{"VirtualMachine", []string{"name", "parent", "datastore", "network", "config", "guest", "runtime", "summary"}},
 		{"Datastore", []string{"name", "parent", "summary", "info"}},
+		{"StoragePod", []string{"name", "parent", "summary", "childEntity"}},
 		{"Network", []string{"name", "parent", "host", "summary"}},
 		{"DistributedVirtualPortgroup", []string{"name", "parent", "host", "config", "summary"}},
 		{"VmwareDistributedVirtualSwitch", []string{"name", "parent", "summary"}},
 		{"ResourcePool", []string{"name", "parent", "vm", "resourcePool"}},
+		{"VirtualApp", []string{"name", "parent", "vm", "vAppConfig"}},
 	}
 
 	for _, k := range kinds {
@@ -443,6 +445,17 @@ func (c *VCenterCollector) collectEntities(kind string, props []string) {
 			props["type"] = ds.Summary.Type
 			props["capacity"] = ds.Summary.Capacity
 			props["freeSpace"] = ds.Summary.FreeSpace
+			props["accessible"] = ds.Summary.Accessible
+			props["multipleHostAccess"] = ds.Summary.MultipleHostAccess
+
+			// VMFS-specific properties
+			if ds.Info != nil {
+				if vmfsInfo, ok := ds.Info.(*types.VmfsDatastoreInfo); ok && vmfsInfo.Vmfs != nil {
+					props["vmfsVersion"] = vmfsInfo.Vmfs.Version
+					props["blockSizeMb"] = vmfsInfo.Vmfs.BlockSizeMb
+				}
+			}
+
 			c.ensureNodeWithTags([]string{"Datastore"}, id, props, ds.Reference().Value)
 			// Datastores are usually contained in a datastore folder under a datacenter
 			if ds.Parent != nil {
@@ -450,12 +463,56 @@ func (c *VCenterCollector) collectEntities(kind string, props []string) {
 				c.Graph.AddEdge("CONTAINS", c.makeID(parentKind, ds.Parent.Value), id, nil)
 			}
 		}
+	case "StoragePod":
+		var pods []mo.StoragePod
+		v.Retrieve(c.Context, []string{kind}, props, &pods)
+		for _, pod := range pods {
+			id := c.makeID("datastore_cluster", pod.Reference().Value)
+			props := map[string]any{
+				"name": pod.Name,
+				"moid": pod.Reference().Value,
+			}
+
+			if pod.Summary != nil {
+				props["capacity"] = pod.Summary.Capacity
+				props["freeSpace"] = pod.Summary.FreeSpace
+			}
+
+			c.ensureNodeWithTags([]string{"DatastoreCluster"}, id, props, pod.Reference().Value)
+			// DatastoreClusters are contained in a datastore folder under a datacenter
+			if pod.Parent != nil {
+				parentKind := c.mapEntityType(pod.Parent.Type)
+				c.Graph.AddEdge("CONTAINS", c.makeID(parentKind, pod.Parent.Value), id, nil)
+			}
+			// DatastoreCluster contains Datastores
+			for _, dsRef := range pod.ChildEntity {
+				if dsRef.Type == "Datastore" {
+					c.Graph.AddEdge("CONTAINS", id, c.makeID("datastore", dsRef.Value), nil)
+				}
+			}
+		}
 	case "Network":
 		var nets []mo.Network
 		v.Retrieve(c.Context, []string{kind}, props, &nets)
 		for _, net := range nets {
 			id := c.makeID("network", net.Reference().Value)
-			c.ensureNodeWithTags([]string{"Network"}, id, map[string]any{"name": net.Name, "moid": net.Reference().Value, "type": "Network"}, net.Reference().Value)
+			props := map[string]any{
+				"name": net.Name,
+				"moid": net.Reference().Value,
+				"type": "Network",
+				"kind": "Network",
+			}
+
+			if net.Summary != nil {
+				if netSummary, ok := net.Summary.(*types.NetworkSummary); ok {
+					props["accessible"] = netSummary.Accessible
+					if netSummary.Network != nil {
+						props["network"] = netSummary.Network.Value
+					}
+				}
+			}
+
+			c.ensureNodeWithTags([]string{"Network"}, id, props, net.Reference().Value)
 			// Networks are contained in a network folder under a datacenter
 			if net.Parent != nil {
 				parentKind := c.mapEntityType(net.Parent.Type)
@@ -467,7 +524,39 @@ func (c *VCenterCollector) collectEntities(kind string, props []string) {
 		v.Retrieve(c.Context, []string{kind}, props, &dvps)
 		for _, dvp := range dvps {
 			id := c.makeID("dvportgroup", dvp.Reference().Value)
-			c.ensureNodeWithTags([]string{"DVPortgroup", "Network"}, id, map[string]any{"name": dvp.Name, "moid": dvp.Reference().Value, "type": "DistributedVirtualPortgroup"}, dvp.Reference().Value)
+			props := map[string]any{
+				"name": dvp.Name,
+				"moid": dvp.Reference().Value,
+				"type": "DistributedVirtualPortgroup",
+				"kind": "DVPortgroup",
+			}
+
+			// Config properties
+			if dvp.Config.Key != "" {
+				props["key"] = dvp.Config.Key
+			}
+			props["numPorts"] = dvp.Config.NumPorts
+			if dvp.Config.AutoExpand != nil {
+				props["autoExpand"] = *dvp.Config.AutoExpand
+			}
+
+			// VLAN ID from default port config
+			if dvp.Config.DefaultPortConfig != nil {
+				if portConfig, ok := dvp.Config.DefaultPortConfig.(*types.VMwareDVSPortSetting); ok && portConfig.Vlan != nil {
+					if vlanSpec, ok := portConfig.Vlan.(*types.VmwareDistributedVirtualSwitchVlanIdSpec); ok {
+						props["vlanId"] = vlanSpec.VlanId
+					}
+				}
+			}
+
+			// Accessible from summary
+			if dvp.Summary != nil {
+				// The summary is a PortgroupConnecteeInfo which doesn't have accessible directly
+				// but we can mark it as accessible if it exists
+				props["accessible"] = true
+			}
+
+			c.ensureNodeWithTags([]string{"DVPortgroup", "Network"}, id, props, dvp.Reference().Value)
 			// DVPortgroups are contained in the network folder but belong to a DVSwitch
 			if dvp.Config.DistributedVirtualSwitch != nil {
 				c.Graph.AddEdge("CONTAINS", c.makeID("dvswitch", dvp.Config.DistributedVirtualSwitch.Value), id, nil)
@@ -495,6 +584,22 @@ func (c *VCenterCollector) collectEntities(kind string, props []string) {
 				// ResourcePools can be nested under other ResourcePools, or under a Cluster/Host
 				parentKind := c.mapEntityType(rp.Parent.Type)
 				c.Graph.AddEdge("CONTAINS", c.makeID(parentKind, rp.Parent.Value), id, nil)
+			}
+		}
+	case "VirtualApp":
+		var vapps []mo.VirtualApp
+		v.Retrieve(c.Context, []string{kind}, props, &vapps)
+		for _, vapp := range vapps {
+			id := c.makeID("vapp", vapp.Reference().Value)
+			c.ensureNodeWithTags([]string{"vApp"}, id, map[string]any{"name": vapp.Name, "moid": vapp.Reference().Value}, vapp.Reference().Value)
+			if vapp.Parent != nil {
+				// vApps are typically children of ResourcePools
+				parentKind := c.mapEntityType(vapp.Parent.Type)
+				c.Graph.AddEdge("CONTAINS", c.makeID(parentKind, vapp.Parent.Value), id, nil)
+			}
+			// vApp contains VMs - add CONTAINS edges
+			for _, vmRef := range vapp.Vm {
+				c.Graph.AddEdge("CONTAINS", id, c.makeID("vm", vmRef.Value), nil)
 			}
 		}
 	}
@@ -533,19 +638,40 @@ func (c *VCenterCollector) CollectPermissions() {
 	}
 	c.Debugf("Found %d Roles", len(roles))
 
+	// Build role privilege info for HAS_PERMISSION edges
+	type rolePrivInfo struct {
+		privilegeIds    []string
+		privilegeNames  []string
+		privilegeGroups []string
+	}
+	rolePrivilegesMap := make(map[int32]rolePrivInfo)
+
 	for _, role := range roles {
 		roleID := fmt.Sprintf("role:%s:%d", c.Config.Host, role.RoleId)
 
 		groups := make([]string, 0)
 		seenGroups := make(map[string]bool)
+		privIds := make([]string, 0, len(role.Privilege))
+		privNames := make([]string, 0, len(role.Privilege))
 
 		for _, privStr := range role.Privilege {
+			privIds = append(privIds, privStr)
+			privName := privStr
 			if pInfo, ok := privMap[privStr]; ok {
+				privName = pInfo.Name
 				if pInfo.PrivGroupName != "" && !seenGroups[pInfo.PrivGroupName] {
 					seenGroups[pInfo.PrivGroupName] = true
 					groups = append(groups, pInfo.PrivGroupName)
 				}
 			}
+			privNames = append(privNames, privName)
+		}
+
+		// Store privilege info for this role
+		rolePrivilegesMap[role.RoleId] = rolePrivInfo{
+			privilegeIds:    privIds,
+			privilegeNames:  privNames,
+			privilegeGroups: groups,
 		}
 
 		c.Graph.EnsureNode([]string{"Role"}, roleID, map[string]any{
@@ -624,6 +750,7 @@ func (c *VCenterCollector) CollectPermissions() {
 			"username": username,
 			"domain":   domain,
 			"isGroup":  isGroup,
+			"tags":     []string{},
 		})
 
 		// SyncsToVCenterUser / SyncsToVCenterGroup Edge
@@ -658,6 +785,15 @@ func (c *VCenterCollector) CollectPermissions() {
 			"roleName":  roleName,
 			"propagate": perm.Propagate,
 		}
+
+		// Add privilege details from the role
+		if privInfo, ok := rolePrivilegesMap[perm.RoleId]; ok {
+			props["privilegeIds"] = privInfo.privilegeIds
+			props["privilegeNames"] = privInfo.privilegeNames
+			props["privilegeGroups"] = privInfo.privilegeGroups
+			props["privilegeCount"] = len(privInfo.privilegeIds)
+		}
+
 		c.Graph.AddEdge("HAS_PERMISSION", principalID, entityID, props)
 	}
 }
@@ -676,12 +812,16 @@ func (c *VCenterCollector) mapEntityType(vimType string) string {
 		return "datacenter"
 	case "Datastore":
 		return "datastore"
+	case "StoragePod":
+		return "datastore_cluster"
 	case "Network":
 		return "network"
 	case "Folder":
 		return "folder"
 	case "ResourcePool":
 		return "resource_pool"
+	case "VirtualApp":
+		return "vapp"
 	case "DistributedVirtualPortgroup":
 		return "dvportgroup"
 	case "VmwareDistributedVirtualSwitch":
@@ -701,6 +841,10 @@ func (c *VCenterCollector) mapEntityKind(vimType string) string {
 		return "DVPortgroup"
 	case "VmwareDistributedVirtualSwitch":
 		return "DVSwitch"
+	case "VirtualApp":
+		return "vApp"
+	case "StoragePod":
+		return "DatastoreCluster"
 	default:
 		return vimType
 	}
