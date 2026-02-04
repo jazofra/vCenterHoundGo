@@ -224,6 +224,7 @@ func (c *VCenterCollector) CollectInfrastructure() {
 		{"HostSystem", []string{"name", "parent", "vm", "datastore", "network", "summary", "config.product", "runtime"}},
 		{"VirtualMachine", []string{"name", "parent", "datastore", "network", "config", "guest", "runtime", "summary"}},
 		{"Datastore", []string{"name", "parent", "summary", "info"}},
+		{"StoragePod", []string{"name", "parent", "summary", "childEntity"}},
 		{"Network", []string{"name", "parent", "host", "summary"}},
 		{"DistributedVirtualPortgroup", []string{"name", "parent", "host", "config", "summary"}},
 		{"VmwareDistributedVirtualSwitch", []string{"name", "parent", "summary"}},
@@ -460,6 +461,34 @@ func (c *VCenterCollector) collectEntities(kind string, props []string) {
 			if ds.Parent != nil {
 				parentKind := c.mapEntityType(ds.Parent.Type)
 				c.Graph.AddEdge("CONTAINS", c.makeID(parentKind, ds.Parent.Value), id, nil)
+			}
+		}
+	case "StoragePod":
+		var pods []mo.StoragePod
+		v.Retrieve(c.Context, []string{kind}, props, &pods)
+		for _, pod := range pods {
+			id := c.makeID("datastore_cluster", pod.Reference().Value)
+			props := map[string]any{
+				"name": pod.Name,
+				"moid": pod.Reference().Value,
+			}
+
+			if pod.Summary != nil {
+				props["capacity"] = pod.Summary.Capacity
+				props["freeSpace"] = pod.Summary.FreeSpace
+			}
+
+			c.ensureNodeWithTags([]string{"DatastoreCluster"}, id, props, pod.Reference().Value)
+			// DatastoreClusters are contained in a datastore folder under a datacenter
+			if pod.Parent != nil {
+				parentKind := c.mapEntityType(pod.Parent.Type)
+				c.Graph.AddEdge("CONTAINS", c.makeID(parentKind, pod.Parent.Value), id, nil)
+			}
+			// DatastoreCluster contains Datastores
+			for _, dsRef := range pod.ChildEntity {
+				if dsRef.Type == "Datastore" {
+					c.Graph.AddEdge("CONTAINS", id, c.makeID("datastore", dsRef.Value), nil)
+				}
 			}
 		}
 	case "Network":
@@ -721,6 +750,7 @@ func (c *VCenterCollector) CollectPermissions() {
 			"username": username,
 			"domain":   domain,
 			"isGroup":  isGroup,
+			"tags":     []string{},
 		})
 
 		// SyncsToVCenterUser / SyncsToVCenterGroup Edge
@@ -782,6 +812,8 @@ func (c *VCenterCollector) mapEntityType(vimType string) string {
 		return "datacenter"
 	case "Datastore":
 		return "datastore"
+	case "StoragePod":
+		return "datastore_cluster"
 	case "Network":
 		return "network"
 	case "Folder":
@@ -811,6 +843,8 @@ func (c *VCenterCollector) mapEntityKind(vimType string) string {
 		return "DVSwitch"
 	case "VirtualApp":
 		return "vApp"
+	case "StoragePod":
+		return "DatastoreCluster"
 	default:
 		return vimType
 	}
