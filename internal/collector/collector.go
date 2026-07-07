@@ -31,6 +31,10 @@ type VCenterCollector struct {
 	DomainMap   map[string]string // NetBIOS -> FQDN
 	ComputerMap map[string]string // hostname -> objectid (from BloodHound API)
 	Logger      *log.Logger
+
+	// sessionUsers tracks principals that already have a live HasSession edge,
+	// so historical login events don't emit a duplicate edge for them.
+	sessionUsers map[string]bool
 }
 
 func NewCollector(cfg config.Config, gb *graph.Builder, domainMap map[string]string, computerMap map[string]string) *VCenterCollector {
@@ -41,12 +45,13 @@ func NewCollector(cfg config.Config, gb *graph.Builder, domainMap map[string]str
 		computerMap = make(map[string]string)
 	}
 	return &VCenterCollector{
-		Config:      cfg,
-		Graph:       gb,
-		TagMap:      make(map[string][]string),
-		DomainMap:   domainMap,
-		ComputerMap: computerMap,
-		Logger:      log.New(os.Stdout, "vCenterHound: ", log.Ldate|log.Ltime),
+		Config:       cfg,
+		Graph:        gb,
+		TagMap:       make(map[string][]string),
+		DomainMap:    domainMap,
+		ComputerMap:  computerMap,
+		Logger:       log.New(os.Stdout, "vCenterHound: ", log.Ldate|log.Ltime),
+		sessionUsers: make(map[string]bool),
 	}
 }
 
@@ -96,6 +101,14 @@ func (c *VCenterCollector) Collect() {
 	// 4. Collect Group Memberships
 	// This depends on Group nodes existing from the Permission step.
 	c.CollectGroupMemberships()
+
+	// 5. Collect Sessions and Events (opt-in)
+	// Adds HasSession (User -> vCenter) and AccessedVM (User -> VM) edges,
+	// plus login enrichment on User nodes. Off by default to keep runs fast.
+	if c.Config.CollectEvents {
+		c.CollectSessions()
+		c.CollectEvents()
+	}
 }
 
 // Helpers
