@@ -34,6 +34,10 @@ func main() {
 	syncComputers := flag.Bool("sync-computers", false, "Enable syncing VMs/Hosts to AD Computers using target domains")
 	syncComputersAPI := flag.Bool("sync-computers-api", false, "Use BloodHound API to fetch computers (slower but more accurate)")
 
+	// Session / Event collection
+	collectEvents := flag.Bool("collect-events", false, "Collect active sessions and historical login/VM-usage events (HasSession, AccessedVM edges)")
+	eventsSince := flag.Int("events-since", 30, "How many days of event history to query when --collect-events is set")
+
 	flag.Parse()
 
 	if *server == "" || *user == "" || *password == "" {
@@ -106,18 +110,20 @@ func main() {
 		}
 
 		cfg := config.Config{
-			Host:              host,
-			User:              *user,
-			Password:          *password,
-			Port:              *port,
-			OutputPath:        *outPath,
-			Debug:             *debug,
-			BHURL:             *bhURL,
-			BHKeyID:           *bhKeyID,
-			BHKeySecret:       *bhKeySecret,
-			TargetDomains:     targetDomainsList,
-			SyncComputers:     *syncComputers || *syncComputersAPI,
-			SyncComputersAPI:  *syncComputersAPI,
+			Host:             host,
+			User:             *user,
+			Password:         *password,
+			Port:             *port,
+			OutputPath:       *outPath,
+			Debug:            *debug,
+			BHURL:            *bhURL,
+			BHKeyID:          *bhKeyID,
+			BHKeySecret:      *bhKeySecret,
+			TargetDomains:    targetDomainsList,
+			SyncComputers:    *syncComputers || *syncComputersAPI,
+			SyncComputersAPI: *syncComputersAPI,
+			CollectEvents:    *collectEvents,
+			EventsSinceDays:  *eventsSince,
 		}
 
 		col := collector.NewCollector(cfg, gb, domainMap, computerMap)

@@ -126,6 +126,8 @@ func NewBuilder() *Builder {
 			"MOUNTS":                "Mounts",
 			"HAS_PRIVILEGE":         "HasPrivilege",
 			"SYNCS_TO_VCENTER_USER": "SyncsToVCenterUser",
+			"HAS_SESSION":           "HasSession",
+			"ACCESSED_VM":           "AccessedVM",
 		},
 	}
 }

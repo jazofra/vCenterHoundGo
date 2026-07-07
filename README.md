@@ -11,6 +11,7 @@ Export vCenter data (hosts, VMs, permissions, users, groups, tags) into a BloodH
     *   **Infrastructure**: Datacenters, Clusters, ESXi Hosts, Resource Pools, VMs, Datastores, Networks.
     *   **Permissions**: Roles, Privileges, Users, Groups, and complex permission assignments.
     *   **Tags**: vCenter Tags collected via REST API (associated with VMs/Hosts).
+    *   **Sessions & Usage** (opt-in): Active vCenter sessions and historical login/VM-usage events, exposing *who authenticates to vCenter* and *who operates a given VM* (including console access).
 *   **Active Directory Sync**: Automatically links vCenter users/groups to Active Directory nodes in BloodHound by resolving NetBIOS domains to FQDNs via BloodHound Enterprise API.
 *   **Computer-to-VM Mapping**: Links AD Computer objects to their corresponding vCenter VMs and ESXi Hosts (similar to CyberArkHound's `--target-domains`).
 *   **Group Memberships**: Resolves nested group memberships including SSO and local groups.
@@ -86,6 +87,20 @@ This mode queries BloodHound API to verify computers exist before creating edges
   --target-domains "CORP.LOCAL"
 ```
 
+**With Session & Usage Collection:**
+Collect active vCenter sessions and historical login/VM-usage events to reveal *who authenticates to vCenter* and *who operates a given VM* (including console access). This is opt-in because it queries event history, which can be large. Service/extension accounts and the collector's own account are filtered out automatically.
+
+```bash
+./vCenterHound \
+  -s vc.example.com \
+  -u administrator@vsphere.local \
+  -p "Password!" \
+  --collect-events \
+  --events-since 30
+```
+
+> Note: The full active-session list requires the `Sessions.TerminateSession` privilege; without it only the collector's own session is visible. `vCenter_AccessedVM` reflects **management-plane** usage (vCenter operations and remote-console tickets). Guest-OS interactive logins inside the VM are not exposed by vCenter and are out of scope.
+
 **Debug Mode:**
 Enable detailed logging and stats.
 ```bash
@@ -108,6 +123,8 @@ Enable detailed logging and stats.
 | `--target-domains` | Comma-separated list of target AD domains for computer sync (e.g., `CORP.LOCAL,PROD.EXAMPLE.COM`) | |
 | `--sync-computers` | Enable syncing VMs/Hosts to AD Computers using static name matching | `false` |
 | `--sync-computers-api` | Use BloodHound API to fetch and verify computers (slower but more accurate) | `false` |
+| `--collect-events` | Collect active sessions and historical login/VM-usage events (`vCenter_HasSession`, `vCenter_AccessedVM` edges) | `false` |
+| `--events-since` | Days of event history to query when `--collect-events` is set | `30` |
 
 ## Node Types
 
@@ -147,6 +164,8 @@ The tool generates the following node types:
 | `SyncsTovCenterGroup` | Group (AD) | vCenter_Group | Links an AD Group to its corresponding vCenter Principal. |
 | `RepresentsVM` | Computer (AD) | vCenter_VM | Links an AD Computer to its corresponding vCenter VM. |
 | `RepresentsHost` | Computer (AD) | vCenter_ESXiHost | Links an AD Computer to its corresponding ESXi Host. |
+| `vCenter_HasSession` | vCenter_User | vCenter_VCenter | A principal has an active session (`source: active`) or has authenticated in the queried window (`source: historical`). Carries source IP/user agent. Requires `--collect-events`. |
+| `vCenter_AccessedVM` | vCenter_User | vCenter_VM | A principal operated a VM (power ops, reconfigure, migrate) or opened its console (`consoleAccess: true`). Carries `eventCount`, `lastSeen`, `eventTypes`. Requires `--collect-events`. |
 
 ## Data Flow Diagram
 
@@ -218,6 +237,10 @@ flowchart TD
     %% Permissions (Simplified for readability, applies to any entity)
     VCUser == vCenter_HasPermission ==> Root
     VCGroup == vCenter_HasPermission ==> VM
+
+    %% Sessions & Usage (opt-in, --collect-events)
+    VCUser -. vCenter_HasSession .-> VC
+    VCUser -. vCenter_AccessedVM .-> VM
 
     %% Styling
     style ADUser fill:#17E625,stroke:#0B8A14,stroke-width:2px
@@ -304,6 +327,32 @@ Show which ESXi hosts are domain-joined.
 ```cypher
 MATCH (c:Computer)-[:RepresentsHost]->(h:vCenter_ESXiHost)
 RETURN c.name as ADComputer, h.name as ESXiHost
+```
+
+### 10. Find Who Has Accessed a Specific VM
+Identify principals who operated or opened the console of a given VM (requires `--collect-events`).
+
+```cypher
+MATCH (u:vCenter_User)-[r:vCenter_AccessedVM]->(vm:vCenter_VM {name: "PROD-DC01"})
+RETURN u.name, r.consoleAccess, r.eventCount, r.lastSeen, r.eventTypes
+ORDER BY r.lastSeen DESC
+```
+
+### 11. Find Users Who Actually Authenticate to vCenter
+Surface principals with a real (active or recent) session, not just an assigned permission.
+
+```cypher
+MATCH (u:vCenter_User)-[r:vCenter_HasSession]->(vc:vCenter_VCenter)
+RETURN u.name, r.source, coalesce(r.ipAddress, r.sourceIps) AS source, r.lastActiveTime, r.lastLogin
+```
+
+### 12. Attack Path: AD User → vCenter Session → VM Console Access
+Chain a synced AD user to the VMs whose console they can reach.
+
+```cypher
+MATCH (ad:User)-[:SyncsTovCenterUser]->(u:vCenter_User)-[:vCenter_HasSession]->(:vCenter_VCenter)
+MATCH (u)-[a:vCenter_AccessedVM {consoleAccess: true}]->(vm:vCenter_VM)
+RETURN ad.name AS ADUser, u.name AS vCenterUser, vm.name AS VM, a.lastSeen
 ```
 
 ## Acknowledgments

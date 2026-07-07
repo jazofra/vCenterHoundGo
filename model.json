@@ -243,6 +243,22 @@
         "width": 2
       },
       "label": "Represents Host"
+    },
+    "vCenter_HasSession": {
+      "style": {
+        "color": "#E63946",
+        "line": "solid",
+        "width": 2
+      },
+      "label": "Has Session"
+    },
+    "vCenter_AccessedVM": {
+      "style": {
+        "color": "#F72585",
+        "line": "dashed",
+        "width": 2
+      },
+      "label": "Accessed VM"
     }
   },
   "metadata": {
